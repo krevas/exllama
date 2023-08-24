@@ -47,9 +47,10 @@ class ExLlamaAltGenerator:
         self.tokenizer = tokenizer
         self.cache = cache
         self.settings = ExLlamaAltGenerator.Settings()
+        self.ascii_cnt = 0
 
 
-    def cached_tokenize(self, text: str, encode_special_characters = False):
+    def cached_tokenize(self, text: str, encode_special_characters = False, max_seq_len=4096):
 
         if text in self.tokenizer_cache:
             return self.tokenizer_cache[text]
@@ -57,14 +58,14 @@ class ExLlamaAltGenerator:
         while len(self.tokenizer_cache) >= MAX_CACHED_STRINGS:
             del self.tokenizer_cache[next(iter(self.tokenizer_cache))]  # Always removes oldest entry, as of Python 3.7
 
-        new_enc = self.tokenizer.encode(text, encode_special_characters = encode_special_characters)
+        new_enc = self.tokenizer.encode(text, encode_special_characters = encode_special_characters, add_bos=True, max_seq_len=max_seq_len)
         self.tokenizer_cache[text] = new_enc
         return new_enc
 
 
-    def get_num_tokens(self, text: str, encode_special_characters = False):
+    def get_num_tokens(self, text: str, encode_special_characters = False, max_seq_len:int = 4096):
 
-        return self.cached_tokenize(text, encode_special_characters = encode_special_characters).shape[-1]
+        return self.cached_tokenize(text, encode_special_characters = encode_special_characters, max_seq_len=max_seq_len).shape[-1]
 
 
     # Begin generating
@@ -74,7 +75,7 @@ class ExLlamaAltGenerator:
     # settings: ExLlamaAltGeneratorSettings
     # encode_special_characters: Set to true to tokenize "</s>" etc.
 
-    def begin_stream(self, prompt: str, stop_conditions: list, max_new_tokens: int, gen_settings: Settings, encode_special_characters = False):
+    def begin_stream(self, prompt: str, stop_conditions: list, max_new_tokens: int, gen_settings: Settings, encode_special_characters = False, max_seq_len: int=4096):
 
         assert isinstance(prompt, str), "ExLlamaAltGenerator does not support batched generation"
 
@@ -83,7 +84,7 @@ class ExLlamaAltGenerator:
         max_input_tokens = self.model.config.max_seq_len - max_new_tokens
         self.remaining_tokens = max_new_tokens
 
-        input_ids = self.cached_tokenize(prompt, encode_special_characters)
+        input_ids = self.cached_tokenize(prompt, encode_special_characters, max_seq_len=max_seq_len)
         applied_input_ids = input_ids[:, -max_input_tokens:]
         self.sequence_str = self.tokenizer.decode(applied_input_ids)[0] if applied_input_ids.shape[0] < input_ids.shape[0] else prompt
 
@@ -98,7 +99,7 @@ class ExLlamaAltGenerator:
 
         self.held_text = ""
 
-        self.max_stop_tokens = 2
+        self.max_stop_tokens = 4
         for ss in self.stop_strings:
             self.max_stop_tokens = max(self.max_stop_tokens, self.get_num_tokens(ss) + 2)
 
@@ -140,7 +141,16 @@ class ExLlamaAltGenerator:
         # Decode the tail end of the sequence with the added token to get (actual) characters added
 
         new_tail = self.tokenizer.decode(self.sequence_ids[:, -(self.max_stop_tokens + 1):])[0]
-        self.held_text += new_tail[len(old_tail):]
+        if "�" == new_tail[len(old_tail):]:
+            self.ascii_cnt += 1
+        elif self.ascii_cnt == 0:
+            self.held_text += new_tail[len(old_tail):]
+        elif self.ascii_cnt == 2:
+            self.held_text += new_tail[len(old_tail)-2:]
+            self.ascii_cnt = 0
+        elif self.ascii_cnt == 3:
+            self.held_text += new_tail[len(old_tail)-3:]
+            self.ascii_cnt = 0
 
         # Hold text as long as it contains part of a stop string
 
